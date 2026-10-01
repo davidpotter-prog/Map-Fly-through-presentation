@@ -76,37 +76,52 @@ def generate_waypoints_narrative(stops_data, api_key):
             stop["ai_summary"] = f"Metrics: {stop['distance_km']} km, {stop['heading']}° heading."
     return stops_data
 
-def create_google_earth_kml(stops_data, output_path="earth_presentation.kml"):
-    """
-    Generates a KML file with sequential placemarks, 3D camera angles, 
-    and HTML-formatted popup bubbles containing the AI narrative.
-    """
+def create_google_earth_kml(stops_data, gdf, tilt=65, range_meters=800, output_path="earth_presentation.kml"):
     kml = ['<?xml version="1.0" encoding="UTF-8"?>']
     kml.append('<kml xmlns="http://www.opengis.net/kml/2.2">')
     kml.append('  <Document>')
     kml.append('    <name>AI Generated Earth Tour</name>')
 
+    kml.append('    <Style id="routeLineStyle">')
+    kml.append('      <LineStyle><color>ff00aaff</color><width>5</width></LineStyle>')
+    kml.append('    </Style>')
+
+    # 1. Draw the continuous route line
+    kml.append('    <Placemark>')
+    kml.append('      <name>Route Path</name>')
+    kml.append('      <styleUrl>#routeLineStyle</styleUrl>')
+    kml.append('      <MultiGeometry>')
+    for geom in gdf.geometry:
+        if geom.type == 'LineString':
+            coords = " ".join([f"{x},{y},0" for x, y in geom.coords])
+            kml.append(f'        <LineString><coordinates>{coords}</coordinates></LineString>')
+        elif geom.type == 'MultiLineString':
+            for line in geom.geoms:
+                coords = " ".join([f"{x},{y},0" for x, y in line.coords])
+                kml.append(f'        <LineString><coordinates>{coords}</coordinates></LineString>')
+    kml.append('      </MultiGeometry>')
+    kml.append('    </Placemark>')
+
+    # 2. Add individual stops with dynamic camera
     for idx, stop in enumerate(stops_data):
         lon, lat = stop["geometry"].x, stop["geometry"].y
         heading = stop["heading"]
         title = stop.get("title", f"Stop {idx+1}")
         summary = stop.get("ai_summary", "")
 
-        # Format the popup bubble text using HTML
         description = f"<![CDATA[<h3>{title}</h3><p>{summary}</p>]]>"
 
         kml.append('    <Placemark>')
         kml.append(f'      <name>{idx + 1}. {title}</name>')
         kml.append(f'      <description>{description}</description>')
         
-        # The Camera View: controls what the user sees when they click "Next"
         kml.append('      <LookAt>')
         kml.append(f'        <longitude>{lon}</longitude>')
         kml.append(f'        <latitude>{lat}</latitude>')
         kml.append('        <altitude>0</altitude>')
-        kml.append(f'        <heading>{heading}</heading>') # Looks down the path
-        kml.append('        <tilt>65</tilt>') # Gives a cinematic 3D angled view
-        kml.append('        <range>800</range>') # Camera distance from the ground (meters)
+        kml.append(f'        <heading>{heading}</heading>')
+        kml.append(f'        <tilt>{tilt}</tilt>')               # DYNAMIC TILT
+        kml.append(f'        <range>{range_meters}</range>')     # DYNAMIC RANGE/HEIGHT
         kml.append('        <altitudeMode>relativeToGround</altitudeMode>')
         kml.append('      </LookAt>')
         
@@ -124,52 +139,42 @@ def create_google_earth_kml(stops_data, output_path="earth_presentation.kml"):
     return output_path
 
 # --- UI LAYOUT ---
-st.set_page_config(page_title="Route-to-Slide Generator", layout="wide")
-st.title("🗺️ Automated Geospatial Slideshow Builder")
+st.set_page_config(page_title="Earth Tour Generator", layout="wide")
+st.title("🌍 Automated Google Earth Tour Builder")
 
 # Sidebar Configuration
 with st.sidebar:
     st.header("⚙️ Settings")
-    
-    # Try to load secrets first, otherwise leave blank for manual entry
-    maps_key = st.text_input("Google Maps API Key", value=st.secrets.get("GOOGLE_MAPS_KEY", ""), type="password")
     gemini_key = st.text_input("Gemini API Key", value=st.secrets.get("GEMINI_API_KEY", ""), type="password")
     
     st.markdown("---")
-    slide_count = st.slider("Number of Waypoints / Slides", min_value=3, max_value=20, value=8)
-    map_type = st.selectbox("Map Style", ["Satellite", "Terrain", "Hybrid", "Roadmap"])
+    st.subheader("📍 Route Waypoints")
+    # This controls how many stops are sampled
+    slide_count = st.slider("Number of Stops to Generate", min_value=3, max_value=50, value=10)
     
     st.markdown("---")
-    st.subheader("🎨 Custom Branding (Optional)")
-    uploaded_template = st.file_uploader("Upload Corporate Template (.pptx)", type=["pptx"])
-    layout_index = st.number_input("Template Layout Index (Default: 6 for Blank)", min_value=0, max_value=15, value=6)
+    st.subheader("🎥 Camera Angle")
+    # 0 is top-down 2D map view, 80 is looking flat at the horizon
+    camera_tilt = st.slider("Camera Tilt", min_value=0, max_value=80, value=65, help="0 = Straight down, 80 = Looking at horizon")
+    # Range controls how high the camera sits above the point
+    camera_range = st.slider("Camera Height (meters)", min_value=100, max_value=5000, value=800, step=100, help="Distance from camera to ground")
 
 # Main Dashboard
-uploaded_route = st.file_uploader("📂 Upload Route File (KMZ, KML, GeoJSON, GPX)", type=["kmz", "kml", "geojson", "json", "gpx"])
+uploaded_route = st.file_uploader("📂 Upload Route File (KMZ, KML, GeoJSON)", type=["kmz", "kml", "geojson", "json"])
 
 if uploaded_route:
     st.success(f"Loaded {uploaded_route.name} successfully!")
     
-    if st.button("🚀 Generate Presentation", type="primary"):
-        if not maps_key or not gemini_key:
-            st.error("⚠️ Please provide both API keys in the sidebar.")
+    if st.button("🚀 Generate Earth Tour", type="primary"):
+        if not gemini_key:
+            st.error("⚠️ Please provide the Gemini API key in the sidebar.")
         else:
-            with st.spinner("Analyzing geometry, capturing maps, and generating narrative..."):
-                # 1. Save uploaded file to a temporary location (required for GeoPandas to read zipped KMZ)
+            with st.spinner("Analyzing geometry and writing narrative..."):
                 with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_route.name.split('.')[-1]}") as tmp_route:
                     tmp_route.write(uploaded_route.getvalue())
                     tmp_route_path = tmp_route.name
 
-                # 2. Save uploaded template to a temp file (if provided)
-                tmp_template_path = None
-                if uploaded_template:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pptx") as tmp_template:
-                        tmp_template.write(uploaded_template.getvalue())
-                        tmp_template_path = tmp_template.name
-
-              # 3. Process the file
                 try:
-                    # A. Unzip KMZ if necessary
                     if uploaded_route.name.lower().endswith('.kmz'):
                         with zipfile.ZipFile(tmp_route_path, 'r') as kmz:
                             kml_filename = [f for f in kmz.namelist() if f.endswith('.kml')][0]
@@ -177,7 +182,6 @@ if uploaded_route:
                     else:
                         read_path = tmp_route_path
 
-                    # B. Read ALL layers
                     layers = fiona.listlayers(read_path)
                     gdfs = [gpd.read_file(read_path, layer=l) for l in layers if not gpd.read_file(read_path, layer=l).empty]
                     
@@ -192,33 +196,25 @@ if uploaded_route:
                         st.error("⚠️ No routes found! Please upload a file containing a drawn path.")
                         st.stop()
 
-                    # C. Generate Data & KML
-                    # Notice we entirely removed fetch_waypoint_maps()
+                    # Execute pipeline with UI parameters
                     stops = sample_polyline_waypoints(gdf, num_stops=slide_count)
                     stops = generate_waypoints_narrative(stops, api_key=gemini_key)
                     
-                    # Generate the KML instead of PPTX
-                    kml_file = create_google_earth_kml(stops)
+                    # Pass the dynamic camera settings to the KML generator
+                    kml_file = create_google_earth_kml(
+                        stops, 
+                        gdf=gdf, 
+                        tilt=camera_tilt, 
+                        range_meters=camera_range
+                    )
                     st.success("✅ Google Earth Tour complete!")
                     
-                    # D. Download Button
                     with open(kml_file, "rb") as file:
                         st.download_button(
                             label="📥 Download Earth Tour (.kml)",
                             data=file,
                             file_name="Automated_Earth_Tour.kml",
                             mime="application/vnd.google-earth.kml+xml"
-                        )
-                except Exception as e:
-                    st.error(f"An error occurred during processing: {e}")
-                    
-                    # 4. Provide the download button
-                    with open(pptx_file, "rb") as file:
-                        st.download_button(
-                            label="📥 Download Slideshow (.pptx)",
-                            data=file,
-                            file_name="Automated_Route_Deck.pptx",
-                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
                         )
                 except Exception as e:
                     st.error(f"An error occurred during processing: {e}")
