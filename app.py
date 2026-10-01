@@ -198,7 +198,7 @@ with st.sidebar:
     sampling_mode = st.radio("Waypoint Spacing Mode", ["Every X Feet", "Fixed Number of Stops"])
     
     # Calculate stops based on chosen mode
-                    if sampling_mode == "Every X Feet":
+            if sampling_mode == "Every X Feet":
                         stops, total_ft, total_miles = sample_polyline_waypoints_by_distance(gdf, interval_ft=interval_ft)
                         st.info(f"📏 Route Length: **{total_ft:,.0f} feet** ({total_miles} miles) — Generated **{len(stops)} waypoints** every {interval_ft} ft.")
                     else:
