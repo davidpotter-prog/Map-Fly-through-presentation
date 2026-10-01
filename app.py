@@ -1,12 +1,10 @@
 import streamlit as st
 import os
 import json
-import requests
 import geopandas as gpd
 from shapely.geometry import LineString
+from shapely.ops import linemerge
 import numpy as np
-from pptx import Presentation
-from pptx.util import Inches
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
@@ -24,30 +22,39 @@ class SlideContent(BaseModel):
     ai_summary: str
 
 # --- CORE FUNCTIONS ---
-from shapely.ops import linemerge
+def sample_polyline_waypoints(gdf, num_stops):
+    merged_geom = gdf.geometry.unary_union
+    if merged_geom.geom_type == 'MultiLineString':
+        merged_geom = linemerge(merged_geom)
+    if merged_geom.geom_type == 'MultiLineString':
+        line = list(merged_geom.geoms)[0]
+    else:
+        line = merged_geom
+
+    total_length = line.length
+    distances = np.linspace(0, total_length, num_stops)
+    stops = []
+    for d in distances:
+        pt = line.interpolate(d)
+        lookahead_pt = line.interpolate(min(d + (total_length * 0.01), total_length))
+        heading = np.degrees(np.arctan2(lookahead_pt.x - pt.x, lookahead_pt.y - pt.y)) % 360
+        stops.append({"geometry": pt, "distance_km": round(d / 1000, 2), "heading": heading})
+    return stops
 
 def sample_polyline_waypoints_by_distance(gdf, interval_ft=800):
-    """
-    Projects route geometry into UTM meters to accurately calculate total length,
-    then samples waypoints every `interval_ft` feet along the line.
-    """
-    # 1. Merge any broken/multi-part lines into a single continuous geometry
     merged_geom = gdf.geometry.unary_union
     if merged_geom.geom_type == 'MultiLineString':
         merged_geom = linemerge(merged_geom)
         
-    # If the file still has multiple disconnected paths, pick the primary line
     if merged_geom.geom_type == 'MultiLineString':
         line_wgs = list(merged_geom.geoms)[0]
     else:
         line_wgs = merged_geom
 
-    # 2. Convert WGS84 (degrees) to local UTM projection (meters) for accurate measurement
     temp_gdf = gpd.GeoDataFrame(geometry=[line_wgs], crs="EPSG:4326")
     utm_crs = temp_gdf.estimate_utm_crs()
     line_utm = temp_gdf.to_crs(utm_crs).geometry.iloc[0]
 
-    # 3. Calculate lengths
     total_length_m = line_utm.length
     total_length_ft = total_length_m * 3.28084
     interval_m = interval_ft * 0.3048
@@ -55,21 +62,16 @@ def sample_polyline_waypoints_by_distance(gdf, interval_ft=800):
     if total_length_m == 0:
         return [], 0, 0
 
-    # 4. Generate distances along the route in meters
     distances_m = list(np.arange(0, total_length_m, interval_m))
     
-    # Optional: ensure the final endpoint is included
     if (total_length_m - distances_m[-1]) > (interval_m / 2):
         distances_m.append(total_length_m)
 
     stops = []
     for d in distances_m:
         fraction = d / total_length_m if total_length_m > 0 else 0
-        
-        # Interpolate normalized point along original WGS84 line
         pt = line_wgs.interpolate(fraction, normalized=True)
         lookahead_pt = line_wgs.interpolate(min(fraction + 0.01, 1.0), normalized=True)
-        
         heading = np.degrees(np.arctan2(lookahead_pt.x - pt.x, lookahead_pt.y - pt.y)) % 360
         
         stops.append({
@@ -81,32 +83,10 @@ def sample_polyline_waypoints_by_distance(gdf, interval_ft=800):
 
     return stops, total_length_ft, round(total_length_ft / 5280, 2)
 
-def fetch_waypoint_maps(stops_data, api_key, map_type):
-    os.makedirs("temp_maps", exist_ok=True)
-    base_url = "https://maps.googleapis.com/maps/api/staticmap"
-    for idx, stop in enumerate(stops_data):
-        lat, lon = stop["geometry"].y, stop["geometry"].x  
-        params = {
-            "center": f"{lat},{lon}",
-            "zoom": 15,
-            "size": "800x450",
-            "maptype": map_type.lower(),
-            "markers": f"color:red|label:{idx+1}|{lat},{lon}",
-            "key": api_key
-        }
-        response = requests.get(base_url, params=params)
-        if response.status_code == 200:
-            file_path = f"temp_maps/stop_{idx+1}.png"
-            with open(file_path, "wb") as f: f.write(response.content)
-            stop["map_image_path"] = file_path
-        else:
-            stop["map_image_path"] = None
-    return stops_data
-
 def generate_waypoints_narrative(stops_data, api_key):
     client = genai.Client(api_key=api_key)
     for idx, stop in enumerate(stops_data):
-        prompt = f"We are at waypoint {idx + 1}. Distance: {stop['distance_km']}km, Heading: {stop['heading']}°. Generate a concise, engaging slide title and a brief 2-3 sentence narrative summary for this stop."
+        prompt = f"We are at waypoint {idx + 1}. Heading: {stop['heading']}°. Generate a concise, engaging slide title and a brief 2-3 sentence narrative summary for this stop."
         try:
             response = client.models.generate_content(
                 model='gemini-2.5-flash',
@@ -118,7 +98,7 @@ def generate_waypoints_narrative(stops_data, api_key):
             stop["ai_summary"] = data.get("ai_summary", "")
         except Exception as e:
             stop["title"] = f"Waypoint {idx + 1}"
-            stop["ai_summary"] = f"Metrics: {stop['distance_km']} km, {stop['heading']}° heading."
+            stop["ai_summary"] = f"Heading: {stop['heading']}°"
     return stops_data
 
 def create_google_earth_kml(stops_data, gdf, tilt=65, range_meters=800, output_path="earth_presentation.kml"):
@@ -131,14 +111,12 @@ def create_google_earth_kml(stops_data, gdf, tilt=65, range_meters=800, output_p
     kml.append('      <LineStyle><color>ff00aaff</color><width>5</width></LineStyle>')
     kml.append('    </Style>')
 
-    # 1. Draw the continuous route line (Safely handling 3D altitude data)
     kml.append('    <Placemark>')
     kml.append('      <name>Route Path</name>')
     kml.append('      <styleUrl>#routeLineStyle</styleUrl>')
     kml.append('      <MultiGeometry>')
     for geom in gdf.geometry:
         if geom.type == 'LineString':
-            # pt[0] is lon, pt[1] is lat. This ignores pt[2] if altitude exists.
             coords = " ".join([f"{pt[0]},{pt[1]},0" for pt in geom.coords])
             kml.append(f'        <LineString><coordinates>{coords}</coordinates></LineString>')
         elif geom.type == 'MultiLineString':
@@ -148,7 +126,6 @@ def create_google_earth_kml(stops_data, gdf, tilt=65, range_meters=800, output_p
     kml.append('      </MultiGeometry>')
     kml.append('    </Placemark>')
 
-    # 2. Add individual stops with dynamic camera
     for idx, stop in enumerate(stops_data):
         lon, lat = stop["geometry"].x, stop["geometry"].y
         heading = stop["heading"]
@@ -188,7 +165,6 @@ def create_google_earth_kml(stops_data, gdf, tilt=65, range_meters=800, output_p
 st.set_page_config(page_title="Earth Tour Generator", layout="wide")
 st.title("🌍 Automated Google Earth Tour Builder")
 
-# Sidebar Configuration
 with st.sidebar:
     st.header("⚙️ Settings")
     gemini_key = st.text_input("Gemini API Key", value=st.secrets.get("GEMINI_API_KEY", ""), type="password")
@@ -197,26 +173,8 @@ with st.sidebar:
     st.subheader("📍 Waypoint Mode")
     sampling_mode = st.radio("Waypoint Spacing Mode", ["Every X Feet", "Fixed Number of Stops"])
     
-    # Calculate stops based on chosen mode
-    # Calculate stops based on chosen mode
-                    if sampling_mode == "Every X Feet":
-                        stops, total_ft, total_miles = sample_polyline_waypoints_by_distance(gdf, interval_ft=interval_ft)
-                        st.info(f"📏 Route Length: **{total_ft:,.0f} feet** ({total_miles} miles) — Generated **{len(stops)} waypoints** every {interval_ft} ft.")
-                    else:
-                        stops = sample_polyline_waypoints(gdf, num_stops=slide_count)
-
-                    # Generate AI Narrative
-                    stops = generate_waypoints_narrative(stops, api_key=gemini_key)
-                    
-                    # Build KML
-                    kml_file = create_google_earth_kml(
-                        stops, 
-                        gdf=gdf, 
-                        tilt=camera_tilt, 
-                        range_meters=camera_range
-                    )
-                    
-                    st.success("✅ Google Earth Tour complete!")
+    if sampling_mode == "Every X Feet":
+        interval_ft = st.number_input("Waypoint Interval (feet)", min_value=100, max_value=10000, value=800, step=100)
     else:
         slide_count = st.slider("Total Waypoints", min_value=3, max_value=100, value=10)
 
@@ -225,7 +183,6 @@ with st.sidebar:
     camera_tilt = st.slider("Camera Tilt", min_value=0, max_value=80, value=65)
     camera_range = st.slider("Camera Height (meters)", min_value=100, max_value=5000, value=800, step=100)
 
-# Main Dashboard
 uploaded_route = st.file_uploader("📂 Upload Route File (KMZ, KML, GeoJSON)", type=["kmz", "kml", "geojson", "json"])
 
 if uploaded_route:
@@ -262,17 +219,21 @@ if uploaded_route:
                         st.error("⚠️ No routes found! Please upload a file containing a drawn path.")
                         st.stop()
 
-                    # Execute pipeline with UI parameters
-                    stops = sample_polyline_waypoints(gdf, num_stops=slide_count)
+                    if sampling_mode == "Every X Feet":
+                        stops, total_ft, total_miles = sample_polyline_waypoints_by_distance(gdf, interval_ft=interval_ft)
+                        st.info(f"📏 Route Length: **{total_ft:,.0f} feet** ({total_miles} miles) — Generated **{len(stops)} waypoints** every {interval_ft} ft.")
+                    else:
+                        stops = sample_polyline_waypoints(gdf, num_stops=slide_count)
+
                     stops = generate_waypoints_narrative(stops, api_key=gemini_key)
                     
-                    # Pass the dynamic camera settings to the KML generator
                     kml_file = create_google_earth_kml(
                         stops, 
                         gdf=gdf, 
                         tilt=camera_tilt, 
                         range_meters=camera_range
                     )
+                    
                     st.success("✅ Google Earth Tour complete!")
                     
                     with open(kml_file, "rb") as file:
