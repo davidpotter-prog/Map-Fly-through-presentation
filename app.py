@@ -107,11 +107,13 @@ def create_google_earth_kml(stops_data, gdf, tilt=65, range_meters=800, output_p
     kml.append('  <Document>')
     kml.append('    <name>AI Generated Earth Tour</name>')
 
+    # 1. Style for the Route Line
     kml.append('    <Style id="routeLineStyle">')
     kml.append('      <LineStyle><color>ff00aaff</color><width>5</width></LineStyle>')
     kml.append('    </Style>')
 
-    kml.append('    <Placemark>')
+    # 2. Draw the continuous route line
+    kml.append('    <Placemark id="route_line_01">')
     kml.append('      <name>Route Path</name>')
     kml.append('      <styleUrl>#routeLineStyle</styleUrl>')
     kml.append('      <MultiGeometry>')
@@ -126,6 +128,7 @@ def create_google_earth_kml(stops_data, gdf, tilt=65, range_meters=800, output_p
     kml.append('      </MultiGeometry>')
     kml.append('    </Placemark>')
 
+    # 3. Add individual stops with INLINE styles to defeat auto-grouping
     for idx, stop in enumerate(stops_data):
         lon, lat = stop["geometry"].x, stop["geometry"].y
         heading = stop["heading"]
@@ -134,10 +137,20 @@ def create_google_earth_kml(stops_data, gdf, tilt=65, range_meters=800, output_p
 
         description = f"<![CDATA[<h3>{title}</h3><p>{summary}</p>]]>"
 
-        kml.append('    <Placemark>')
+        # UNIQUE ID: Forces Google Earth to recognize this as a separate slide
+        kml.append(f'    <Placemark id="waypoint_{idx+1}">')  
         kml.append(f'      <name>{idx + 1}. {title}</name>')
         kml.append(f'      <description>{description}</description>')
         
+        # INLINE STYLE: Prevents Earth Web from clustering into a single Data Layer
+        kml.append('      <Style>')
+        kml.append('        <IconStyle>')
+        kml.append('          <scale>1.2</scale>')
+        kml.append('          <Icon><href>http://maps.google.com/mapfiles/kml/paddle/red-circle.png</href></Icon>')
+        kml.append('        </IconStyle>')
+        kml.append('        <LabelStyle><scale>1.1</scale></LabelStyle>')
+        kml.append('      </Style>')
+
         kml.append('      <LookAt>')
         kml.append(f'        <longitude>{lon}</longitude>')
         kml.append(f'        <latitude>{lat}</latitude>')
