@@ -13,6 +13,7 @@ from pydantic import BaseModel
 import fiona
 import tempfile
 import zipfile
+import pandas as pd
 
 # Enable KML/KMZ support in GeoPandas
 fiona.drvsupport.supported_drivers['KML'] = 'rw'
@@ -145,17 +146,37 @@ if uploaded_route:
 
                # 3. Process the file
                 try:
+                    # A. Unzip KMZ if necessary
                     if uploaded_route.name.lower().endswith('.kmz'):
-                        # Manually unzip the KMZ to find the KML file inside
                         with zipfile.ZipFile(tmp_route_path, 'r') as kmz:
-                            # Find the first .kml file in the archive (usually doc.kml)
                             kml_filename = [f for f in kmz.namelist() if f.endswith('.kml')][0]
-                            # Extract it to a temporary folder and read that instead
-                            extracted_path = kmz.extract(kml_filename, path=tempfile.gettempdir())
-                        gdf = gpd.read_file(extracted_path)
+                            read_path = kmz.extract(kml_filename, path=tempfile.gettempdir())
                     else:
-                        gdf = gpd.read_file(tmp_route_path)
+                        read_path = tmp_route_path
 
+                    # B. Read ALL layers in the file (bypassing the empty first-folder problem)
+                    layers = fiona.listlayers(read_path)
+                    gdfs = []
+                    for layer in layers:
+                        layer_gdf = gpd.read_file(read_path, layer=layer)
+                        if not layer_gdf.empty:
+                            gdfs.append(layer_gdf)
+                            
+                    if not gdfs:
+                        st.error("⚠️ Could not find any map data in this file.")
+                        st.stop() # Stops execution cleanly
+                        
+                    # Combine all layers into one master table
+                    gdf = pd.concat(gdfs, ignore_index=True)
+                    
+                    # C. Filter to keep ONLY routes/lines (ignores standalone pins/placemarks)
+                    gdf = gdf[gdf.geometry.type.isin(['LineString', 'MultiLineString'])]
+                    
+                    if gdf.empty:
+                        st.error("⚠️ No routes found! Make sure your file contains a drawn path (LineString), not just individual dropped pins.")
+                        st.stop()
+
+                    # D. Proceed with slide generation
                     stops = sample_polyline_waypoints(gdf, num_stops=slide_count)
                     stops = fetch_waypoint_maps(stops, api_key=maps_key, map_type=map_type)
                     stops = generate_waypoints_narrative(stops, api_key=gemini_key)
