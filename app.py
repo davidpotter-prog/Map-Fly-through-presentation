@@ -24,17 +24,62 @@ class SlideContent(BaseModel):
     ai_summary: str
 
 # --- CORE FUNCTIONS ---
-def sample_polyline_waypoints(gdf, num_stops):
-    line = gdf.geometry.iloc[0]
-    total_length = line.length
-    distances = np.linspace(0, total_length, num_stops)
+from shapely.ops import linemerge
+
+def sample_polyline_waypoints_by_distance(gdf, interval_ft=800):
+    """
+    Projects route geometry into UTM meters to accurately calculate total length,
+    then samples waypoints every `interval_ft` feet along the line.
+    """
+    # 1. Merge any broken/multi-part lines into a single continuous geometry
+    merged_geom = gdf.geometry.unary_union
+    if merged_geom.geom_type == 'MultiLineString':
+        merged_geom = linemerge(merged_geom)
+        
+    # If the file still has multiple disconnected paths, pick the primary line
+    if merged_geom.geom_type == 'MultiLineString':
+        line_wgs = list(merged_geom.geoms)[0]
+    else:
+        line_wgs = merged_geom
+
+    # 2. Convert WGS84 (degrees) to local UTM projection (meters) for accurate measurement
+    temp_gdf = gpd.GeoDataFrame(geometry=[line_wgs], crs="EPSG:4326")
+    utm_crs = temp_gdf.estimate_utm_crs()
+    line_utm = temp_gdf.to_crs(utm_crs).geometry.iloc[0]
+
+    # 3. Calculate lengths
+    total_length_m = line_utm.length
+    total_length_ft = total_length_m * 3.28084
+    interval_m = interval_ft * 0.3048
+
+    if total_length_m == 0:
+        return [], 0, 0
+
+    # 4. Generate distances along the route in meters
+    distances_m = list(np.arange(0, total_length_m, interval_m))
+    
+    # Optional: ensure the final endpoint is included
+    if (total_length_m - distances_m[-1]) > (interval_m / 2):
+        distances_m.append(total_length_m)
+
     stops = []
-    for d in distances:
-        pt = line.interpolate(d)
-        lookahead_pt = line.interpolate(min(d + (total_length * 0.01), total_length))
+    for d in distances_m:
+        fraction = d / total_length_m if total_length_m > 0 else 0
+        
+        # Interpolate normalized point along original WGS84 line
+        pt = line_wgs.interpolate(fraction, normalized=True)
+        lookahead_pt = line_wgs.interpolate(min(fraction + 0.01, 1.0), normalized=True)
+        
         heading = np.degrees(np.arctan2(lookahead_pt.x - pt.x, lookahead_pt.y - pt.y)) % 360
-        stops.append({"geometry": pt, "distance_km": round(d / 1000, 2), "heading": heading})
-    return stops
+        
+        stops.append({
+            "geometry": pt,
+            "distance_km": round(d / 1000, 2),
+            "distance_ft": round(d * 3.28084, 0),
+            "heading": heading
+        })
+
+    return stops, total_length_ft, round(total_length_ft / 5280, 2)
 
 def fetch_waypoint_maps(stops_data, api_key, map_type):
     os.makedirs("temp_maps", exist_ok=True)
@@ -86,18 +131,19 @@ def create_google_earth_kml(stops_data, gdf, tilt=65, range_meters=800, output_p
     kml.append('      <LineStyle><color>ff00aaff</color><width>5</width></LineStyle>')
     kml.append('    </Style>')
 
-    # 1. Draw the continuous route line
+    # 1. Draw the continuous route line (Safely handling 3D altitude data)
     kml.append('    <Placemark>')
     kml.append('      <name>Route Path</name>')
     kml.append('      <styleUrl>#routeLineStyle</styleUrl>')
     kml.append('      <MultiGeometry>')
     for geom in gdf.geometry:
         if geom.type == 'LineString':
-            coords = " ".join([f"{x},{y},0" for x, y in geom.coords])
+            # pt[0] is lon, pt[1] is lat. This ignores pt[2] if altitude exists.
+            coords = " ".join([f"{pt[0]},{pt[1]},0" for pt in geom.coords])
             kml.append(f'        <LineString><coordinates>{coords}</coordinates></LineString>')
         elif geom.type == 'MultiLineString':
             for line in geom.geoms:
-                coords = " ".join([f"{x},{y},0" for x, y in line.coords])
+                coords = " ".join([f"{pt[0]},{pt[1]},0" for pt in line.coords])
                 kml.append(f'        <LineString><coordinates>{coords}</coordinates></LineString>')
     kml.append('      </MultiGeometry>')
     kml.append('    </Placemark>')
@@ -120,8 +166,8 @@ def create_google_earth_kml(stops_data, gdf, tilt=65, range_meters=800, output_p
         kml.append(f'        <latitude>{lat}</latitude>')
         kml.append('        <altitude>0</altitude>')
         kml.append(f'        <heading>{heading}</heading>')
-        kml.append(f'        <tilt>{tilt}</tilt>')               # DYNAMIC TILT
-        kml.append(f'        <range>{range_meters}</range>')     # DYNAMIC RANGE/HEIGHT
+        kml.append(f'        <tilt>{tilt}</tilt>')
+        kml.append(f'        <range>{range_meters}</range>')
         kml.append('        <altitudeMode>relativeToGround</altitudeMode>')
         kml.append('      </LookAt>')
         
@@ -148,16 +194,33 @@ with st.sidebar:
     gemini_key = st.text_input("Gemini API Key", value=st.secrets.get("GEMINI_API_KEY", ""), type="password")
     
     st.markdown("---")
-    st.subheader("📍 Route Waypoints")
-    # This controls how many stops are sampled
-    slide_count = st.slider("Number of Stops to Generate", min_value=3, max_value=50, value=10)
+    st.subheader("📍 Waypoint Mode")
+    sampling_mode = st.radio("Waypoint Spacing Mode", ["Every X Feet", "Fixed Number of Stops"])
     
+    # Calculate stops based on chosen mode
+                    if sampling_mode == "Every X Feet":
+                        stops, total_ft, total_miles = sample_polyline_waypoints_by_distance(gdf, interval_ft=interval_ft)
+                        st.info(f"📏 Route Length: **{total_ft:,.0f} feet** ({total_miles} miles) — Generated **{len(stops)} waypoints** every {interval_ft} ft.")
+                    else:
+                        stops = sample_polyline_waypoints(gdf, num_stops=slide_count)
+
+                    # Generate AI Narrative
+                    stops = generate_waypoints_narrative(stops, api_key=gemini_key)
+                    
+                    # Build KML
+                    kml_file = create_google_earth_kml(
+                        stops, 
+                        gdf=gdf, 
+                        tilt=camera_tilt, 
+                        range_meters=camera_range
+                    )
+    else:
+        slide_count = st.slider("Total Waypoints", min_value=3, max_value=100, value=10)
+
     st.markdown("---")
     st.subheader("🎥 Camera Angle")
-    # 0 is top-down 2D map view, 80 is looking flat at the horizon
-    camera_tilt = st.slider("Camera Tilt", min_value=0, max_value=80, value=65, help="0 = Straight down, 80 = Looking at horizon")
-    # Range controls how high the camera sits above the point
-    camera_range = st.slider("Camera Height (meters)", min_value=100, max_value=5000, value=800, step=100, help="Distance from camera to ground")
+    camera_tilt = st.slider("Camera Tilt", min_value=0, max_value=80, value=65)
+    camera_range = st.slider("Camera Height (meters)", min_value=100, max_value=5000, value=800, step=100)
 
 # Main Dashboard
 uploaded_route = st.file_uploader("📂 Upload Route File (KMZ, KML, GeoJSON)", type=["kmz", "kml", "geojson", "json"])
