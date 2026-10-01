@@ -76,28 +76,51 @@ def generate_waypoints_narrative(stops_data, api_key):
             stop["ai_summary"] = f"Metrics: {stop['distance_km']} km, {stop['heading']}° heading."
     return stops_data
 
-def create_presentation(stops_data, template_path=None, layout_index=6):
-    prs = Presentation(template_path) if template_path else Presentation()
-    try:
-        slide_layout = prs.slide_layouts[layout_index]
-    except IndexError:
-        slide_layout = prs.slide_layouts[0]
-        
+def create_google_earth_kml(stops_data, output_path="earth_presentation.kml"):
+    """
+    Generates a KML file with sequential placemarks, 3D camera angles, 
+    and HTML-formatted popup bubbles containing the AI narrative.
+    """
+    kml = ['<?xml version="1.0" encoding="UTF-8"?>']
+    kml.append('<kml xmlns="http://www.opengis.net/kml/2.2">')
+    kml.append('  <Document>')
+    kml.append('    <name>AI Generated Earth Tour</name>')
+
     for idx, stop in enumerate(stops_data):
-        slide = prs.slides.add_slide(slide_layout)
-        # Fallback placement for dynamic boxes
-        title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(9), Inches(1))
-        title_box.text_frame.text = f"Stop {idx + 1}: {stop.get('title', '')}"
+        lon, lat = stop["geometry"].x, stop["geometry"].y
+        heading = stop["heading"]
+        title = stop.get("title", f"Stop {idx+1}")
+        summary = stop.get("ai_summary", "")
+
+        # Format the popup bubble text using HTML
+        description = f"<![CDATA[<h3>{title}</h3><p>{summary}</p>]]>"
+
+        kml.append('    <Placemark>')
+        kml.append(f'      <name>{idx + 1}. {title}</name>')
+        kml.append(f'      <description>{description}</description>')
         
-        if stop.get("map_image_path"):
-            slide.shapes.add_picture(stop["map_image_path"], Inches(0.5), Inches(1.2), width=Inches(6.5))
-            
-        notes_box = slide.shapes.add_textbox(Inches(7.2), Inches(1.2), Inches(2.5), Inches(4.5))
-        notes_box.text_frame.word_wrap = True
-        notes_box.text_frame.text = stop.get("ai_summary", "")
+        # The Camera View: controls what the user sees when they click "Next"
+        kml.append('      <LookAt>')
+        kml.append(f'        <longitude>{lon}</longitude>')
+        kml.append(f'        <latitude>{lat}</latitude>')
+        kml.append('        <altitude>0</altitude>')
+        kml.append(f'        <heading>{heading}</heading>') # Looks down the path
+        kml.append('        <tilt>65</tilt>') # Gives a cinematic 3D angled view
+        kml.append('        <range>800</range>') # Camera distance from the ground (meters)
+        kml.append('        <altitudeMode>relativeToGround</altitudeMode>')
+        kml.append('      </LookAt>')
         
-    output_path = "route_presentation.pptx"
-    prs.save(output_path)
+        kml.append('      <Point>')
+        kml.append(f'        <coordinates>{lon},{lat},0</coordinates>')
+        kml.append('      </Point>')
+        kml.append('    </Placemark>')
+
+    kml.append('  </Document>')
+    kml.append('</kml>')
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(kml))
+        
     return output_path
 
 # --- UI LAYOUT ---
@@ -144,7 +167,7 @@ if uploaded_route:
                         tmp_template.write(uploaded_template.getvalue())
                         tmp_template_path = tmp_template.name
 
-               # 3. Process the file
+              # 3. Process the file
                 try:
                     # A. Unzip KMZ if necessary
                     if uploaded_route.name.lower().endswith('.kmz'):
@@ -154,36 +177,40 @@ if uploaded_route:
                     else:
                         read_path = tmp_route_path
 
-                    # B. Read ALL layers in the file (bypassing the empty first-folder problem)
+                    # B. Read ALL layers
                     layers = fiona.listlayers(read_path)
-                    gdfs = []
-                    for layer in layers:
-                        layer_gdf = gpd.read_file(read_path, layer=layer)
-                        if not layer_gdf.empty:
-                            gdfs.append(layer_gdf)
-                            
+                    gdfs = [gpd.read_file(read_path, layer=l) for l in layers if not gpd.read_file(read_path, layer=l).empty]
+                    
                     if not gdfs:
                         st.error("⚠️ Could not find any map data in this file.")
-                        st.stop() # Stops execution cleanly
+                        st.stop()
                         
-                    # Combine all layers into one master table
                     gdf = pd.concat(gdfs, ignore_index=True)
-                    
-                    # C. Filter to keep ONLY routes/lines (ignores standalone pins/placemarks)
                     gdf = gdf[gdf.geometry.type.isin(['LineString', 'MultiLineString'])]
                     
                     if gdf.empty:
-                        st.error("⚠️ No routes found! Make sure your file contains a drawn path (LineString), not just individual dropped pins.")
+                        st.error("⚠️ No routes found! Please upload a file containing a drawn path.")
                         st.stop()
 
-                    # D. Proceed with slide generation
+                    # C. Generate Data & KML
+                    # Notice we entirely removed fetch_waypoint_maps()
                     stops = sample_polyline_waypoints(gdf, num_stops=slide_count)
-                    stops = fetch_waypoint_maps(stops, api_key=maps_key, map_type=map_type)
                     stops = generate_waypoints_narrative(stops, api_key=gemini_key)
                     
-                    pptx_file = create_presentation(stops, template_path=tmp_template_path, layout_index=layout_index)
+                    # Generate the KML instead of PPTX
+                    kml_file = create_google_earth_kml(stops)
+                    st.success("✅ Google Earth Tour complete!")
                     
-                    st.success("✅ Presentation complete!")
+                    # D. Download Button
+                    with open(kml_file, "rb") as file:
+                        st.download_button(
+                            label="📥 Download Earth Tour (.kml)",
+                            data=file,
+                            file_name="Automated_Earth_Tour.kml",
+                            mime="application/vnd.google-earth.kml+xml"
+                        )
+                except Exception as e:
+                    st.error(f"An error occurred during processing: {e}")
                     
                     # 4. Provide the download button
                     with open(pptx_file, "rb") as file:
