@@ -128,7 +128,7 @@ def create_google_earth_kml(stops_data, gdf, tilt=65, range_meters=800, output_p
     kml.append('      </MultiGeometry>')
     kml.append('    </Placemark>')
 
-    # 3. Add individual stops with INLINE styles to defeat auto-grouping
+    # 3. Add individual stops with INVISIBLE styles
     for idx, stop in enumerate(stops_data):
         lon, lat = stop["geometry"].x, stop["geometry"].y
         heading = stop["heading"]
@@ -137,18 +137,14 @@ def create_google_earth_kml(stops_data, gdf, tilt=65, range_meters=800, output_p
 
         description = f"<![CDATA[<h3>{title}</h3><p>{summary}</p>]]>"
 
-        # UNIQUE ID: Forces Google Earth to recognize this as a separate slide
         kml.append(f'    <Placemark id="waypoint_{idx+1}">')  
         kml.append(f'      <name>{idx + 1}. {title}</name>')
         kml.append(f'      <description>{description}</description>')
         
-        # INLINE STYLE: Prevents Earth Web from clustering into a single Data Layer
+        # INLINE STYLE: Scale set to 0 to hide both the icon and the text label
         kml.append('      <Style>')
-        kml.append('        <IconStyle>')
-        kml.append('          <scale>1.2</scale>')
-        kml.append('          <Icon><href>http://maps.google.com/mapfiles/kml/paddle/red-circle.png</href></Icon>')
-        kml.append('        </IconStyle>')
-        kml.append('        <LabelStyle><scale>1.1</scale></LabelStyle>')
+        kml.append('        <IconStyle><scale>0</scale></IconStyle>')
+        kml.append('        <LabelStyle><scale>0</scale></LabelStyle>')
         kml.append('      </Style>')
 
         kml.append('      <LookAt>')
@@ -173,7 +169,6 @@ def create_google_earth_kml(stops_data, gdf, tilt=65, range_meters=800, output_p
         f.write("\n".join(kml))
         
     return output_path
-
 # --- UI LAYOUT ---
 st.set_page_config(page_title="Earth Tour Generator", layout="wide")
 st.title("🌍 Automated Google Earth Tour Builder")
