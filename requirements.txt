@@ -1,0 +1,7 @@
+streamlit
+geopandas
+shapely
+python-pptx
+google-genai
+requests
+fiona
