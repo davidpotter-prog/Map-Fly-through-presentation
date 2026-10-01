@@ -12,6 +12,7 @@ from google.genai import types
 from pydantic import BaseModel
 import fiona
 import tempfile
+import zipfile
 
 # Enable KML/KMZ support in GeoPandas
 fiona.drvsupport.supported_drivers['KML'] = 'rw'
@@ -142,10 +143,16 @@ if uploaded_route:
                         tmp_template.write(uploaded_template.getvalue())
                         tmp_template_path = tmp_template.name
 
-                # 3. Process the file
+               # 3. Process the file
                 try:
                     if uploaded_route.name.lower().endswith('.kmz'):
-                        gdf = gpd.read_file(f"zip://{tmp_route_path}")
+                        # Manually unzip the KMZ to find the KML file inside
+                        with zipfile.ZipFile(tmp_route_path, 'r') as kmz:
+                            # Find the first .kml file in the archive (usually doc.kml)
+                            kml_filename = [f for f in kmz.namelist() if f.endswith('.kml')][0]
+                            # Extract it to a temporary folder and read that instead
+                            extracted_path = kmz.extract(kml_filename, path=tempfile.gettempdir())
+                        gdf = gpd.read_file(extracted_path)
                     else:
                         gdf = gpd.read_file(tmp_route_path)
 
