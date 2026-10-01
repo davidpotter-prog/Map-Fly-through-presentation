@@ -198,7 +198,8 @@ with st.sidebar:
     sampling_mode = st.radio("Waypoint Spacing Mode", ["Every X Feet", "Fixed Number of Stops"])
     
     # Calculate stops based on chosen mode
-    if sampling_mode == "Every X Feet":
+    # Calculate stops based on chosen mode
+                    if sampling_mode == "Every X Feet":
                         stops, total_ft, total_miles = sample_polyline_waypoints_by_distance(gdf, interval_ft=interval_ft)
                         st.info(f"📏 Route Length: **{total_ft:,.0f} feet** ({total_miles} miles) — Generated **{len(stops)} waypoints** every {interval_ft} ft.")
                     else:
@@ -214,6 +215,8 @@ with st.sidebar:
                         tilt=camera_tilt, 
                         range_meters=camera_range
                     )
+                    
+                    st.success("✅ Google Earth Tour complete!")
     else:
         slide_count = st.slider("Total Waypoints", min_value=3, max_value=100, value=10)
 
